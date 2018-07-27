@@ -11,7 +11,7 @@ Every time we increment the upper 6 bytes, we actually save the next number to a
 
 # Usage
 ```
-./txnid [-daemon] [-ip n.n.n.n] [-port n] [-instance n] [-increment n] [-confdir /path/to/files] [-v]
+./txnid  [-verbose] [-daemon] [-ip n.n.n.n] [-port n] [-instance n] [-increment n] [-confdir /path/to/files]
 ```
 By default, the service will run in the foreground, listening on port 0.0.0.0:8963. Numbers will farmed out, starting at 1 and incrementing by 1. Number generation is kept safe across restarts by saving the progress file in the confdir (default is /etc/txnidserver/txnid.dat) 
 
@@ -20,19 +20,18 @@ But as indicated above, all of those can be overridden by command line options. 
 * Commandline options override
 
 ## Parameters
+* `-verbose (env: TXNID_SERVER_VERBOSE=1):` by default the server runs silently, but if verbose is on, it will output what options it is using at the start (IP, port, etc) as well as a message whenever the lower 16 bits cycles over and the progress file is updated.
 * `-daemon (env: TXNID_SERVER_DAEMON=1):` will put the server into the background and exit with 0 if successful
 * `-ip n.n.n.n (env: TXNID_SERVER_IP=n.n.n.n):`  listen only on the specified IP address or exits with a -1
 * `-port n (env: TXNID_SERVER_PORT=n):` listen on the specified port. You obviously need appropriate permission for < 1024
-* `-instance n (env: TXNID_SERVER_INSTANCE=n):` if you're running a number of instances as a "cluster", then what instance number is this? Can be 0-32767. It's also the starting number on the lower 2 bytes (as above)
+* `-instance n (env: TXNID_SERVER_INSTANCE=n):` if you're running a number of instances as a "cluster", then what instance number is this? Can be 0->32767. It's also the starting number on the lower 2 bytes (as above)
 * `-increment n (env: TXNID_SERVER_INCREMENT=n):` by default, the service increments by 1, but you have the option of incrementing by any number between 1 and 32767. If you're using a cluster (with -instance), then this should be set to the total number of instances you're running
 * `-confdir /path/to/files (env: TXNID_SERVER_CONFDIR=/path/to/files):` the directory where the progress file is saved.
-* `-v (env: TXNID_SERVER_VERBOSE=1):` by default the server runs silently, but if verbose is on, it will output what options it is using at the start (IP, port, etc) as well as a message whenever the lower 16 bits cycles over and the progress file is updated.
 
 # Performance
 It will merrily handle around 200000+ requests a second (tested on localhost on Ubuntu 18.04 on a Toshiba i7 laptop with 16GB of RAM) - you're largely limited by the hardware you run it on.
 
 # TODO
-* Convert generator into an embeddable package
 * Allow a user:group to be set to chroot into if running in daemon mode
 * Define a config file that can configure all of the above to be found in -confdir
 * Create a separate long-lived port so clients can maintain a connection, rather than re-establish one each time.
