@@ -6,7 +6,10 @@ import (
 	"github.com/MeetFrankie/txn-id-server/txnid"
 	"net"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
+	"time"
 )
 
 const (
@@ -20,6 +23,13 @@ const (
 	PROGRESS_FILENAME string = "txnid.dat"
 	MAX_START         int    = 32767
 	MAX_INCREMENT     int    = 32767
+)
+
+// _stop: Global Stop semaphore
+// _progressFile: confirmed location of the progress file
+var (
+	_stop         chan bool = make(chan bool, 50) // overkill probably, but we do want to get the signal.
+	_progressFile string
 )
 
 func InitUsage() {
@@ -113,7 +123,7 @@ func InitFlags(default_verbose, default_daemon bool, default_IP string, default_
 	return
 }
 
-func ValidateStartParams(raw_verbose, raw_daemon bool, raw_IP string, raw_Port int, raw_Start int, raw_Increment int, raw_ConfDir string) (verbose, daemon bool, IP string, Port int, Start int, Increment int, ConfDir string) {
+func ValidateStartParams(raw_verbose, raw_daemon bool, raw_IP string, raw_Port int, raw_Start int, raw_Increment int, raw_ConfDir string) (verbose, daemon bool, IP string, Port int, Start int, Increment int, progressFile string) {
 
 	// These won't be changing
 	verbose = raw_verbose
@@ -130,20 +140,64 @@ func ValidateStartParams(raw_verbose, raw_daemon bool, raw_IP string, raw_Port i
 	if raw_Start >= 0 && raw_Start <= MAX_START {
 		Start = raw_Start
 	} else {
-		_Exit(fmt.Sprintf("Commandline -instance value [%d] is not a number", raw_Start))
+		_Exit(fmt.Sprintf("Commandline -instance value [%d] is not a valid number", raw_Start))
 	}
 
 	if raw_Increment >= 1 && raw_Increment <= MAX_INCREMENT {
 		Increment = raw_Increment
 	} else {
-		_Exit(fmt.Sprintf("Commandline -increment value [%d] is not a number", raw_Increment))
+		_Exit(fmt.Sprintf("Commandline -increment value [%d] is not a valid number", raw_Increment))
 	}
 
 	if raw_Start > raw_Increment {
 		_Exit(fmt.Sprintf("Commandline -instance [%d] must be less than -increment [%d]", raw_Start, raw_Increment))
 	}
 
-	ConfDir = raw_ConfDir
+	progressFile = raw_ConfDir + "/" + PROGRESS_FILENAME
+
+	return
+}
+
+func WritePartialProgressFile(b uint64, progFile string) {
+	WriteFullProgressFile(&b, nil, nil, progFile)
+}
+
+func WriteFullProgressFile(b, c *uint64, i *uint16, progFile string) error {
+
+	var (
+		pf  *os.File
+		err error
+		s   string
+	)
+
+	if pf, err = os.OpenFile(progFile, os.O_RDWR|os.O_CREATE, 700); err != nil {
+		return err
+	}
+	defer pf.Close()
+
+	if c != nil && i != nil {
+		s = fmt.Sprintf("%d|%d|%d", *b, *c, *i)
+	} else {
+		s = fmt.Sprintf("%d||", *b)
+	}
+
+	if _, err = pf.WriteString(s); err != nil {
+		return err
+	}
+
+	return nil
+
+}
+
+func snapAndStop(sas chan os.Signal, n *txnid.Numbers, progFile string) {
+	_ = <-sas // wait for a signal
+	b, c, i := n.Snapshot(true)
+
+	fmt.Printf("Signal caught: snapshot b[%d], c[%d], i[%d]\n", b, c, i)
+
+	if err := WriteFullProgressFile(&b, &c, &i, progFile); err != nil {
+		fmt.Printf("Error writing file: %s", err.Error())
+	}
 
 	return
 }
@@ -160,7 +214,8 @@ func handleConnection(conn net.Conn, n *txnid.Numbers) {
 		s = "-1\n"
 	}
 	conn.Write([]byte(s))
-	return
+
+	_stop <- stopped
 }
 
 func Listen(n *txnid.Numbers, ip string, port int) {
@@ -168,13 +223,12 @@ func Listen(n *txnid.Numbers, ip string, port int) {
 	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", ip, port))
 
 	if err != nil {
-		// handle error
 		fmt.Println("Listen error: ", err.Error())
 		return
 	}
 
-	//	for i := 0; i < 10; i++ {
-	for {
+	stopnow := false
+	for stopnow == false {
 		conn, err := ln.Accept()
 		if err != nil {
 			// handle error
@@ -182,6 +236,8 @@ func Listen(n *txnid.Numbers, ip string, port int) {
 			break
 		}
 		go handleConnection(conn, n)
+
+		stopnow = <-_stop
 	}
 }
 
@@ -189,12 +245,13 @@ func main() {
 
 	InitUsage()
 
-	verbose, daemon, IP, Port, Start, Increment, ConfDir := ValidateStartParams(InitFlags(InitEnv()))
+	verbose, daemon, IP, Port, Start, Increment, _progressFile := ValidateStartParams(InitFlags(InitEnv()))
 
 	numGen := txnid.InitNumbers(0, uint64(Start), uint16(Increment))
 	txnid.RollOverCallBack = func(b uint64) {
 		if verbose {
-			fmt.Printf("Rollover to base of: %d\n", b)
+			fmt.Printf("Rollover to base of: %d. Writing %d to %s\n", b, b+1, _progressFile)
+			WritePartialProgressFile(b+1, _progressFile)
 		}
 	}
 
@@ -207,18 +264,18 @@ func main() {
 		fmt.Println("\tListener Port:", Port)
 		fmt.Println("\tInstance:     ", Start)
 		fmt.Println("\tIncrement:    ", Increment)
-		fmt.Println("\tConfig Dir:   ", ConfDir)
+		fmt.Println("\tProgress File:", _progressFile)
 		fmt.Println("------------------------------------------\nStart:  ", numGen)
 	}
 
+	signalCapture := make(chan os.Signal, 1)
+	signal.Notify(signalCapture, syscall.SIGHUP)
+	go snapAndStop(signalCapture, numGen, _progressFile)
+
 	Listen(numGen, IP, Port)
 
-	//	var i uint64
-	//
-	//	for i < 65540 {
-	//		i = foo.GetNextNum()
-	//		fmt.Println(foo)
-	//	}
+	time.Sleep(5 * time.Second)
+
 	if verbose {
 		fmt.Println("Finish: ", numGen)
 	}

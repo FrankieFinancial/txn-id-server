@@ -34,6 +34,9 @@ var (
 
 // When we tick over (see tickOver), we call back to this optional function
 // Used by the txn-id-server to store progress
+// NOTE:  This will be holding a mutex lock on the number generator, so you cannot
+// generate other numbers within this function.
+// BE CAREFUL AND PLAY NICE. ALL WARRANTIES DEFINITELY VOIDED HERE!
 var (
 	RollOverCallBack func(b uint64) = nil
 )
@@ -72,24 +75,33 @@ func (n *Numbers) GetNextNum() (z uint64, stopped bool) {
 	return z, n._stop
 }
 
+// stop() Non-thread-safe procedure to set the stop flag.
+// Used internally by the Snapshot() and Stop() functions
 func (n *Numbers) stop() {
 	n._stop = true
+	return
 }
 
+// Stop() Thread-safe procedure to set the stop flag.
 func (n *Numbers) Stop() {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 	n.stop()
+	return
 }
 
+// restart() Non-thread-safe procedure to clear the stop flag.
 func (n *Numbers) restart() {
 	n._stop = false
+	return
 }
 
+// Restart() Thread-safe procedure to clear the stop flag.
 func (n *Numbers) Restart() {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 	n.restart()
+	return
 }
 
 // GetCurrent - get the current state of the number generator.
@@ -108,7 +120,8 @@ func (n *Numbers) Snapshot(stop bool) (base uint64, counter uint64, increment ui
 }
 
 // Stringify!
-// Not at all thread-safe, do not rely on this for anything really.
 func (n *Numbers) String() string {
-	return fmt.Sprintf("Number generator: Base: %d, Counter: %d, Increment: %d -> Current: %d", n.base, n.counter, n.increment, n.base|n.counter)
+	b, c, i := n.Snapshot(false)
+
+	return fmt.Sprintf("Number generator: Base: %d, Counter: %d, Increment: %d -> Current: %d", b, c, i, b|c)
 }
