@@ -4,10 +4,12 @@ import (
 	"flag"
 	"fmt"
 	"github.com/MeetFrankie/txn-id-server/txnid"
+	"io"
 	"net"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -25,12 +27,28 @@ const (
 	MAX_INCREMENT     int    = 32767
 )
 
+type config struct {
+	verbose      bool
+	daemon       bool
+	ip           string
+	port         int
+	base         uint64
+	start        int // needs to be typecast to uint64 later
+	increment    int // needs to be typecast to uint16 later
+	confdir      string
+	progressfile string
+	usingfile    bool
+}
+
 // _stop: Global Stop semaphore
 // _progressFile: confirmed location of the progress file
 var (
-	_stop         chan bool = make(chan bool, 50) // overkill probably, but we do want to get the signal.
-	_progressFile string
+	_stop chan bool = make(chan bool, 50) // overkill probably, but we do want to get the signal.
 )
+
+func __debug(s string) {
+	fmt.Println("DEBUG: ", s)
+}
 
 func InitUsage() {
 	flag.Usage = func() {
@@ -49,117 +67,176 @@ func _Exit(err string) {
 // InitEnv pulls in environment vars to override the defaults.
 // No serious validity checking is done, we'll do that after we further
 // override with commandline flags.
-func InitEnv() (verbose, daemon bool, rawIP string, rawPort int, rawStart int, rawIncrement int, rawConfDir string) {
+func InitEnv(cfg *config) *config {
 
-	verbose = DEFAULT_VERBOSE
+	cfg.verbose = DEFAULT_VERBOSE
 	verbose_str := os.Getenv("TXNID_SERVER_VERBOSE")
 	if verbose_str == "1" || verbose_str == "true" || verbose_str == "TRUE" || verbose_str == "True" {
-		verbose = true
+		cfg.verbose = true
 	}
 
-	daemon = DEFAULT_DAEMON
+	cfg.daemon = DEFAULT_DAEMON
 	daemon_str := os.Getenv("TXNID_SERVER_DAEMONISE")
 	if daemon_str == "1" || daemon_str == "true" || daemon_str == "TRUE" || daemon_str == "True" {
-		daemon = true
+		cfg.daemon = true
 	}
 
-	rawIP = DEFAULT_IP
+	cfg.ip = DEFAULT_IP
 	rawIP_str := os.Getenv("TXNID_SERVER_LISTENIP")
 	if rawIP_str != "" {
-		rawIP = rawIP_str
+		cfg.ip = rawIP_str
 	}
 
-	rawPort = DEFAULT_PORT
+	cfg.port = DEFAULT_PORT
 	rawPort_str := os.Getenv("TXNID_SERVER_LISTENPORT")
 	if rawPort_str != "" {
 		if p, err := strconv.Atoi(rawPort_str); err == nil && p > 1 && p < 65535 {
-			rawPort = p
+			cfg.port = p
 		} else {
 			_Exit(fmt.Sprintf("Environment variable TXNID_SERVER_LISTENPORT (%s) is not a valid port number", rawPort_str))
 		}
 	}
 
-	rawStart = DEFAULT_START
+	cfg.start = DEFAULT_START
 	rawStart_str := os.Getenv("TXNID_SERVER_INSTANCE")
 	if rawStart_str != "" {
 		if p, err := strconv.Atoi(rawStart_str); err == nil && p >= 1 && p <= MAX_START {
-			rawStart = p
+			cfg.start = p
 		} else {
 			_Exit(fmt.Sprintf("Environment variable TXNID_SERVER_INSTANCE (%s) is not a valid instance number", rawStart_str))
 		}
 	}
 
-	rawIncrement = DEFAULT_INCREMENT
+	cfg.increment = DEFAULT_INCREMENT
 	rawIncrement_str := os.Getenv("TXNID_SERVER_INCREMENT")
 	if rawIncrement_str != "" {
 		if p, err := strconv.Atoi(rawIncrement_str); err == nil && p >= 1 && p <= MAX_INCREMENT {
-			rawIncrement = p
+			cfg.increment = p
 		} else {
 			_Exit(fmt.Sprintf("Environment variable TXNID_SERVER_INCREMENT (%s) is not a valid increment", rawIncrement_str))
 		}
 	}
 
-	rawConfDir = DEFAULT_CONFDIR
+	cfg.confdir = DEFAULT_CONFDIR
 	rawConfDir_str := os.Getenv("TXNID_SERVER_CONFDIR")
 	if rawConfDir_str != "" {
-		rawConfDir = rawConfDir_str
+		cfg.confdir = rawConfDir_str
 	}
 
-	return
+	return cfg
 }
 
-func InitFlags(default_verbose, default_daemon bool, default_IP string, default_Port int, default_Start int, default_Increment int, default_ConfDir string) (verbose, daemon bool, rawIP string, rawPort int, rawStart int, rawIncrement int, rawConfDir string) {
+func InitFlags(cfg *config) *config {
 
-	flag.BoolVar(&verbose, "verbose", default_verbose, "If set to true, then be verbose, printing start params and progress file rollover")
-	flag.BoolVar(&daemon, "daemon", default_daemon, "If set to true, then spawn a child process and run in the background")
-	flag.StringVar(&rawIP, "ip", default_IP, "If set, only listen on the specified IP address")
-	flag.IntVar(&rawPort, "port", default_Port, "If set, list on port N")
-	flag.IntVar(&rawStart, "instance", default_Start, "If running a cluster of txn id servers, what is the instance number? (Also the starting number)")
-	flag.IntVar(&rawIncrement, "increment", default_Increment, "If set, how many does each successive number increment by. If in a cluster, this must be the total instances running in said cluster")
-	flag.StringVar(&rawConfDir, "confdir", default_ConfDir, "If set, defines the location of the progress file")
+	flag.BoolVar(&(cfg.verbose), "verbose", cfg.verbose, "If set to true, then be verbose, printing start params and progress file rollover")
+	flag.BoolVar(&(cfg.daemon), "daemon", cfg.daemon, "If set to true, then spawn a child process and run in the background")
+	flag.StringVar(&(cfg.ip), "ip", cfg.ip, "If set, only listen on the specified IP address")
+	flag.IntVar(&(cfg.port), "port", cfg.port, "If set, list on port N")
+	flag.IntVar(&(cfg.start), "instance", cfg.start, "If running a cluster of txn id servers, what is the instance number? (Also the starting number)")
+	flag.IntVar(&(cfg.increment), "increment", cfg.increment, "If set, how many does each successive number increment by. If in a cluster, this must be the total instances running in said cluster")
+	flag.StringVar(&(cfg.confdir), "confdir", cfg.confdir, "If set, defines the location of the progress file")
 
 	flag.Parse()
 
-	return
+	return cfg
 }
 
-func ValidateStartParams(raw_verbose, raw_daemon bool, raw_IP string, raw_Port int, raw_Start int, raw_Increment int, raw_ConfDir string) (verbose, daemon bool, IP string, Port int, Start int, Increment int, progressFile string) {
+func ValidateStartParams(cfg *config) *config {
 
 	// These won't be changing
-	verbose = raw_verbose
-	daemon = raw_daemon
+	// cfg.verbose
+	// cfg.daemon
+	// cfg.ip
 
-	IP = raw_IP
-
-	if raw_Port >= 1 && raw_Port <= 65535 {
-		Port = raw_Port
-	} else {
-		_Exit(fmt.Sprintf("Commandline -port value [%d] is not a valid port number", raw_Port))
+	if cfg.port <= 1 || cfg.port >= 65535 {
+		_Exit(fmt.Sprintf("Commandline -port value [%d] is not a valid port number", cfg.port))
 	}
 
-	if raw_Start >= 0 && raw_Start <= MAX_START {
-		Start = raw_Start
-	} else {
-		_Exit(fmt.Sprintf("Commandline -instance value [%d] is not a valid number", raw_Start))
+	if cfg.start <= 0 || cfg.start >= MAX_START {
+		_Exit(fmt.Sprintf("Commandline -instance value [%d] is not a valid number", cfg.start))
 	}
 
-	if raw_Increment >= 1 && raw_Increment <= MAX_INCREMENT {
-		Increment = raw_Increment
-	} else {
-		_Exit(fmt.Sprintf("Commandline -increment value [%d] is not a valid number", raw_Increment))
+	if cfg.increment <= 1 || cfg.increment >= MAX_INCREMENT {
+		_Exit(fmt.Sprintf("Commandline -increment value [%d] is not a valid number", cfg.increment))
 	}
 
-	if raw_Start > raw_Increment {
-		_Exit(fmt.Sprintf("Commandline -instance [%d] must be less than -increment [%d]", raw_Start, raw_Increment))
+	if cfg.start > cfg.increment {
+		_Exit(fmt.Sprintf("Commandline -instance [%d] must be less than -increment [%d]", cfg.start, cfg.increment))
 	}
 
-	progressFile = raw_ConfDir + "/" + PROGRESS_FILENAME
+	cfg.progressfile = cfg.confdir + "/" + PROGRESS_FILENAME
+	if err := LoadProgressFile(cfg); err != nil {
+		_Exit(fmt.Sprintf("Cannot parse progress file [%s]: %s", cfg.progressfile, err.Error()))
+	}
 
-	return
+	return cfg
 }
 
-func WritePartialProgressFile(b uint64, progFile string) {
-	WriteFullProgressFile(&b, nil, nil, progFile)
+func LoadProgressFile(cfg *config) error {
+
+	// max bytes possible
+	var (
+		pf   *os.File
+		ferr error
+	)
+	fileb := make([]byte, 32)
+
+	if pf, ferr = os.OpenFile(cfg.progressfile, os.O_RDWR|os.O_CREATE, 0600); ferr != nil {
+		_Exit(fmt.Sprintf("Cannot open progress file [%s]: %s", cfg.progressfile, ferr.Error()))
+	}
+	defer pf.Close()
+
+	__debug(fmt.Sprintf("1"))
+	num, err := pf.Read(fileb)
+	__debug(fmt.Sprintf("2: %d,%v, %s", num, err, string(fileb)))
+
+	if num > 0 && num <= 32 && (err == nil || err == io.EOF) {
+		var b, c, i uint64
+		__debug(fmt.Sprintf("3: %d,%v", num, err))
+
+		s := strings.Split(string(fileb[:num]), "|")
+		__debug(fmt.Sprintf("4: %v", s))
+		if len(s) == 3 {
+			if b, err = strconv.ParseUint(s[0], 10, 64); err != nil {
+				return fmt.Errorf("Cannot parse base field [%s]: [%s]", s[0], err.Error())
+			}
+
+			if s[1] != "~" {
+				if c, err = strconv.ParseUint(s[1], 10, 16); err != nil {
+					return fmt.Errorf("Cannot parse counter field [%s]: [%s]", s[1], err.Error())
+				}
+			} else {
+				c = uint64(cfg.start)
+			}
+
+			if s[2] != "~" {
+				if i, err = strconv.ParseUint(s[2], 10, 16); err != nil {
+					return fmt.Errorf("Cannot parse increment field [%s]: [%s]", s[2], err.Error())
+				}
+			}
+
+			// All good I think!
+			cfg.base = b
+			cfg.start = int(c)
+			if i > 0 {
+				cfg.increment = int(i)
+			}
+			if cfg.verbose {
+				fmt.Printf("Loaded starting values from progress file [%s]: base [%d], start [%d], increment [%d]\n", cfg.progressfile, cfg.base, cfg.start, cfg.increment)
+			}
+		} else {
+			return fmt.Errorf("Could not parse progress file data [%s]", "string(b)")
+		}
+	} else {
+		__debug(fmt.Sprintf("2a: %d,%v, %s", num, err, string(fileb)))
+		return fmt.Errorf("Error reading progressfile data: [%s] [%s]", "string(b)", err.Error())
+	}
+
+	return nil
+}
+
+func WritePartialProgressFile(b uint64, progFile string) error {
+	return WriteFullProgressFile(&b, nil, nil, progFile)
 }
 
 func WriteFullProgressFile(b, c *uint64, i *uint16, progFile string) error {
@@ -170,7 +247,8 @@ func WriteFullProgressFile(b, c *uint64, i *uint16, progFile string) error {
 		s   string
 	)
 
-	if pf, err = os.OpenFile(progFile, os.O_RDWR|os.O_CREATE, 700); err != nil {
+	if pf, err = os.OpenFile(progFile, os.O_RDWR|os.O_CREATE, 0600); err != nil {
+		// Shouldn't happen as we checked previously, but you never know.
 		return err
 	}
 	defer pf.Close()
@@ -178,7 +256,7 @@ func WriteFullProgressFile(b, c *uint64, i *uint16, progFile string) error {
 	if c != nil && i != nil {
 		s = fmt.Sprintf("%d|%d|%d", *b, *c, *i)
 	} else {
-		s = fmt.Sprintf("%d||", *b)
+		s = fmt.Sprintf("%d|0|0", *b)
 	}
 
 	if _, err = pf.WriteString(s); err != nil {
@@ -189,14 +267,16 @@ func WriteFullProgressFile(b, c *uint64, i *uint16, progFile string) error {
 
 }
 
-func snapAndStop(sas chan os.Signal, n *txnid.Numbers, progFile string) {
-	_ = <-sas // wait for a signal
+func snapAndStop(sas chan os.Signal, n *txnid.Numbers, cfg *config) {
+	sig := <-sas // wait for a signal
 	b, c, i := n.Snapshot(true)
 
-	fmt.Printf("Signal caught: snapshot b[%d], c[%d], i[%d]\n", b, c, i)
+	if cfg.verbose {
+		fmt.Printf("Signal [%v] caught: snapshot b[%d], c[%d], i[%d]\n", sig, b, c, i)
+	}
 
-	if err := WriteFullProgressFile(&b, &c, &i, progFile); err != nil {
-		fmt.Printf("Error writing file: %s", err.Error())
+	if err := WriteFullProgressFile(&b, &c, &i, cfg.progressfile); err != nil {
+		fmt.Fprintf(os.Stderr, "Critical!! Error writing file [%s]: %s", cfg.progressfile, err.Error())
 	}
 
 	return
@@ -223,7 +303,7 @@ func Listen(n *txnid.Numbers, ip string, port int) {
 	ln, err := net.Listen("tcp", fmt.Sprintf("%s:%d", ip, port))
 
 	if err != nil {
-		fmt.Println("Listen error: ", err.Error())
+		fmt.Printf("Listen error on port [%s:%d] - %s", ip, port, err.Error())
 		return
 	}
 
@@ -243,40 +323,67 @@ func Listen(n *txnid.Numbers, ip string, port int) {
 
 func main() {
 
+	// Pre-prep our Usage function to override the flag packages default.
 	InitUsage()
 
-	verbose, daemon, IP, Port, Start, Increment, _progressFile := ValidateStartParams(InitFlags(InitEnv()))
+	// First we extract the ENV vars
+	// Then we override with commandline params
+	// Then we'll load in a save file.
+	// Lastly we'll validate the basics and off we go.
+	cfg := &config{}
+	cfg = ValidateStartParams(InitFlags(InitEnv(cfg)))
 
-	numGen := txnid.InitNumbers(0, uint64(Start), uint16(Increment))
+	// OK, now we have all our parameters, let's get things set up.
+	numGen := txnid.InitNumbers(cfg.base, uint64(cfg.start), uint16(cfg.increment))
+
+	// Set this callback to safe store the base counter.
+	// MUST ensure this is non-blocking and fast as it's inside a
+	//    mutex locked function call.
 	txnid.RollOverCallBack = func(b uint64) {
-		if verbose {
-			fmt.Printf("Rollover to base of: %d. Writing %d to %s\n", b, b+1, _progressFile)
-			WritePartialProgressFile(b+1, _progressFile)
+		if cfg.verbose {
+			fmt.Printf("Rollover to base of: %d. Writing %d to %s\n", b, b+1, cfg.progressfile)
+		}
+		// Write b+1 to safe store in case of crash/hard stop.
+		if err := WritePartialProgressFile(b+1, cfg.progressfile); err != nil {
+			fmt.Fprintf(os.Stderr, "Critical!! Error writing progress file [%s]: %s", cfg.progressfile, err.Error())
 		}
 	}
 
-	if verbose {
+	// OK, so what are the params we settled on? Let's print them.
+	if cfg.verbose {
 		fmt.Println("Transaction ID Server\n------------------------------------------")
 		fmt.Println("Parameters:")
-		fmt.Println("\tVerbose:       on (obviously)")
-		fmt.Println("\tDaemon Mode:  ", daemon)
-		fmt.Println("\tListener IP:  ", IP)
-		fmt.Println("\tListener Port:", Port)
-		fmt.Println("\tInstance:     ", Start)
-		fmt.Println("\tIncrement:    ", Increment)
-		fmt.Println("\tProgress File:", _progressFile)
+		fmt.Println("\tVerbose:              on (obviously)")
+		fmt.Println("\tDaemon Mode:         ", cfg.daemon)
+		fmt.Println("\tListener IP:         ", cfg.ip)
+		fmt.Println("\tListener Port:       ", cfg.port)
+		fmt.Println("\tInstance:            ", cfg.start)
+		fmt.Println("\tIncrement:           ", cfg.increment)
+		fmt.Println("\tProgress File:       ", cfg.progressfile)
+		fmt.Println("\tProgress File Loaded:", cfg.usingfile)
 		fmt.Println("------------------------------------------\nStart:  ", numGen)
 	}
 
+	// Ignore HUP signals - we don't want to reload.
+	signal.Ignore(syscall.SIGHUP)
+
+	// Set up signal capture for INT and TERM to safely shutdown
+	// after saving to disk. Spawn a listener go routine to await.
 	signalCapture := make(chan os.Signal, 1)
-	signal.Notify(signalCapture, syscall.SIGHUP)
-	go snapAndStop(signalCapture, numGen, _progressFile)
+	signal.Notify(signalCapture, syscall.SIGINT, syscall.SIGTERM)
+	go snapAndStop(signalCapture, numGen, cfg)
 
-	Listen(numGen, IP, Port)
+	// Right, all set? Let's go!
+	// Should continue until the signal semaphore is received via
+	// snapAndStop()
+	Listen(numGen, cfg.ip, cfg.port)
 
-	time.Sleep(5 * time.Second)
+	// Wait a few seconds for everything to tidy up.
+	// Probably not necessary.
+	time.Sleep(3 * time.Second)
 
-	if verbose {
+	// Final output if being verbose.
+	if cfg.verbose {
 		fmt.Println("Finish: ", numGen)
 	}
 }
