@@ -116,12 +116,12 @@ func (n *Numbers) Snapshot(stop bool) (base uint64, counter uint64, increment ui
 		n.stop()
 	}
 
-	return n.base, n.counter, n.increment
+	return n.base >> 16, n.counter, n.increment
 }
 
 // Stringify!
 func (n *Numbers) String() string {
 	b, c, i := n.Snapshot(false)
 
-	return fmt.Sprintf("Number generator: Base: %d, Counter: %d, Increment: %d -> Current: %d", b, c, i, b|c)
+	return fmt.Sprintf("Number generator: Base: %d, Counter: %d, Increment: %d -> Current: %d", b, c, i, (b<<16)|c)
 }

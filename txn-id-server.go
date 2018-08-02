@@ -23,6 +23,7 @@ const (
 	DEFAULT_INCREMENT int    = 1
 	DEFAULT_CONFDIR   string = "/etc/txnidserver/"
 	PROGRESS_FILENAME string = "txnid.dat"
+	PROGRESS_FILESIZE int    = 32
 	MAX_START         int    = 32767
 	MAX_INCREMENT     int    = 32767
 )
@@ -41,11 +42,11 @@ type config struct {
 }
 
 // _stop: Global Stop semaphore
-// _progressFile: confirmed location of the progress file
 var (
 	_stop chan bool = make(chan bool, 50) // overkill probably, but we do want to get the signal.
 )
 
+// Boring but useful debug printer.
 func __debug(s string) {
 	fmt.Println("DEBUG: ", s)
 }
@@ -59,9 +60,11 @@ func InitUsage() {
 	}
 }
 
-func _Exit(err string) {
+func _Exit(err string, usage bool) {
 	fmt.Fprintf(flag.CommandLine.Output(), "%s error: %s\n\n", os.Args[0], err)
-	flag.Usage()
+	if usage {
+		flag.Usage()
+	}
 }
 
 // InitEnv pulls in environment vars to override the defaults.
@@ -93,7 +96,7 @@ func InitEnv(cfg *config) *config {
 		if p, err := strconv.Atoi(rawPort_str); err == nil && p > 1 && p < 65535 {
 			cfg.port = p
 		} else {
-			_Exit(fmt.Sprintf("Environment variable TXNID_SERVER_LISTENPORT (%s) is not a valid port number", rawPort_str))
+			_Exit(fmt.Sprintf("Environment variable TXNID_SERVER_LISTENPORT (%s) is not a valid port number", rawPort_str), true)
 		}
 	}
 
@@ -103,7 +106,7 @@ func InitEnv(cfg *config) *config {
 		if p, err := strconv.Atoi(rawStart_str); err == nil && p >= 1 && p <= MAX_START {
 			cfg.start = p
 		} else {
-			_Exit(fmt.Sprintf("Environment variable TXNID_SERVER_INSTANCE (%s) is not a valid instance number", rawStart_str))
+			_Exit(fmt.Sprintf("Environment variable TXNID_SERVER_INSTANCE (%s) is not a valid instance number", rawStart_str), true)
 		}
 	}
 
@@ -113,7 +116,7 @@ func InitEnv(cfg *config) *config {
 		if p, err := strconv.Atoi(rawIncrement_str); err == nil && p >= 1 && p <= MAX_INCREMENT {
 			cfg.increment = p
 		} else {
-			_Exit(fmt.Sprintf("Environment variable TXNID_SERVER_INCREMENT (%s) is not a valid increment", rawIncrement_str))
+			_Exit(fmt.Sprintf("Environment variable TXNID_SERVER_INCREMENT (%s) is not a valid increment", rawIncrement_str), true)
 		}
 	}
 
@@ -144,29 +147,29 @@ func InitFlags(cfg *config) *config {
 func ValidateStartParams(cfg *config) *config {
 
 	// These won't be changing
-	// cfg.verbose
-	// cfg.daemon
-	// cfg.ip
+	// cfg.verbose  // hard to screw up
+	// cfg.daemon   // same
+	// cfg.ip       // will either work or not when we try to open it. Let the OS sort it out.
 
 	if cfg.port <= 1 || cfg.port >= 65535 {
-		_Exit(fmt.Sprintf("Commandline -port value [%d] is not a valid port number", cfg.port))
+		_Exit(fmt.Sprintf("Commandline -port value [%d] is not a valid port number", cfg.port), true)
 	}
 
 	if cfg.start <= 0 || cfg.start >= MAX_START {
-		_Exit(fmt.Sprintf("Commandline -instance value [%d] is not a valid number", cfg.start))
+		_Exit(fmt.Sprintf("Commandline -instance value [%d] is not a valid number", cfg.start), true)
 	}
 
 	if cfg.increment <= 1 || cfg.increment >= MAX_INCREMENT {
-		_Exit(fmt.Sprintf("Commandline -increment value [%d] is not a valid number", cfg.increment))
+		_Exit(fmt.Sprintf("Commandline -increment value [%d] is not a valid number", cfg.increment), true)
 	}
 
 	if cfg.start > cfg.increment {
-		_Exit(fmt.Sprintf("Commandline -instance [%d] must be less than -increment [%d]", cfg.start, cfg.increment))
+		_Exit(fmt.Sprintf("Commandline -instance [%d] must be less than -increment [%d]", cfg.start, cfg.increment), true)
 	}
 
 	cfg.progressfile = cfg.confdir + "/" + PROGRESS_FILENAME
 	if err := LoadProgressFile(cfg); err != nil {
-		_Exit(fmt.Sprintf("Cannot parse progress file [%s]: %s", cfg.progressfile, err.Error()))
+		_Exit(fmt.Sprintf("Cannot parse progress file [%s]: %s", cfg.progressfile, err.Error()), true)
 	}
 
 	return cfg
@@ -179,29 +182,25 @@ func LoadProgressFile(cfg *config) error {
 		pf   *os.File
 		ferr error
 	)
-	fileb := make([]byte, 32)
+	fileb := make([]byte, PROGRESS_FILESIZE)
 
 	if pf, ferr = os.OpenFile(cfg.progressfile, os.O_RDWR|os.O_CREATE, 0600); ferr != nil {
-		_Exit(fmt.Sprintf("Cannot open progress file [%s]: %s", cfg.progressfile, ferr.Error()))
+		_Exit(fmt.Sprintf("Cannot open progress file [%s]: %s", cfg.progressfile, ferr.Error()), true)
 	}
 	defer pf.Close()
 
-	__debug(fmt.Sprintf("1"))
 	num, err := pf.Read(fileb)
-	__debug(fmt.Sprintf("2: %d,%v, %s", num, err, string(fileb)))
 
 	if num > 0 && num <= 32 && (err == nil || err == io.EOF) {
 		var b, c, i uint64
-		__debug(fmt.Sprintf("3: %d,%v", num, err))
 
 		s := strings.Split(string(fileb[:num]), "|")
-		__debug(fmt.Sprintf("4: %v", s))
-		if len(s) == 3 {
+		if len(s) >= 3 {
 			if b, err = strconv.ParseUint(s[0], 10, 64); err != nil {
 				return fmt.Errorf("Cannot parse base field [%s]: [%s]", s[0], err.Error())
 			}
 
-			if s[1] != "~" {
+			if !strings.HasPrefix(s[1], "~") {
 				if c, err = strconv.ParseUint(s[1], 10, 16); err != nil {
 					return fmt.Errorf("Cannot parse counter field [%s]: [%s]", s[1], err.Error())
 				}
@@ -209,7 +208,7 @@ func LoadProgressFile(cfg *config) error {
 				c = uint64(cfg.start)
 			}
 
-			if s[2] != "~" {
+			if !strings.HasPrefix(s[2], "~") {
 				if i, err = strconv.ParseUint(s[2], 10, 16); err != nil {
 					return fmt.Errorf("Cannot parse increment field [%s]: [%s]", s[2], err.Error())
 				}
@@ -224,12 +223,15 @@ func LoadProgressFile(cfg *config) error {
 			if cfg.verbose {
 				fmt.Printf("Loaded starting values from progress file [%s]: base [%d], start [%d], increment [%d]\n", cfg.progressfile, cfg.base, cfg.start, cfg.increment)
 			}
+
+			// Yes, we are.
+			cfg.usingfile = true
+
 		} else {
-			return fmt.Errorf("Could not parse progress file data [%s]", "string(b)")
+			return fmt.Errorf("Could not parse progress file data [%s]", string(fileb))
 		}
 	} else {
-		__debug(fmt.Sprintf("2a: %d,%v, %s", num, err, string(fileb)))
-		return fmt.Errorf("Error reading progressfile data: [%s] [%s]", "string(b)", err.Error())
+		return fmt.Errorf("Error reading progress file data: [%s] [%s]", string(fileb), err.Error())
 	}
 
 	return nil
@@ -244,8 +246,8 @@ func WriteFullProgressFile(b, c *uint64, i *uint16, progFile string) error {
 	var (
 		pf  *os.File
 		err error
-		s   string
 	)
+	s := make([]byte, PROGRESS_FILESIZE, PROGRESS_FILESIZE)
 
 	if pf, err = os.OpenFile(progFile, os.O_RDWR|os.O_CREATE, 0600); err != nil {
 		// Shouldn't happen as we checked previously, but you never know.
@@ -254,12 +256,12 @@ func WriteFullProgressFile(b, c *uint64, i *uint16, progFile string) error {
 	defer pf.Close()
 
 	if c != nil && i != nil {
-		s = fmt.Sprintf("%d|%d|%d", *b, *c, *i)
+		s = []byte(fmt.Sprintf("%d|%d|%d|", *b, *c, *i))
 	} else {
-		s = fmt.Sprintf("%d|0|0", *b)
+		s = []byte(fmt.Sprintf("%d|~|~|", *b))
 	}
 
-	if _, err = pf.WriteString(s); err != nil {
+	if _, err = pf.Write(s); err != nil {
 		return err
 	}
 
@@ -354,7 +356,7 @@ func main() {
 		fmt.Println("Transaction ID Server\n------------------------------------------")
 		fmt.Println("Parameters:")
 		fmt.Println("\tVerbose:              on (obviously)")
-		fmt.Println("\tDaemon Mode:         ", cfg.daemon)
+		fmt.Println("\tDaemon Mode (N/A):   ", cfg.daemon)
 		fmt.Println("\tListener IP:         ", cfg.ip)
 		fmt.Println("\tListener Port:       ", cfg.port)
 		fmt.Println("\tInstance:            ", cfg.start)
