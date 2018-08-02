@@ -21,7 +21,7 @@ But as indicated above, all of those can be overridden by command line options. 
 
 ## Parameters
 * `-verbose (env: TXNID_SERVER_VERBOSE=1):` by default the server runs silently, but if verbose is on, it will output what options it is using at the start (IP, port, etc) as well as a message whenever the lower 16 bits cycles over and the progress file is updated.
-* `-daemon (env: TXNID_SERVER_DAEMON=1):` will put the server into the background and exit with 0 if successful
+* `-daemon (env: TXNID_SERVER_DAEMON=1):` will put the server into the background and exit with 0 if successful (Not yet implemented)
 * `-ip n.n.n.n (env: TXNID_SERVER_IP=n.n.n.n):`  listen only on the specified IP address or exits with a -1
 * `-port n (env: TXNID_SERVER_PORT=n):` listen on the specified port. You obviously need appropriate permission for < 1024
 * `-instance n (env: TXNID_SERVER_INSTANCE=n):` if you're running a number of instances as a "cluster", then what instance number is this? Can be 0->32767. It's also the starting number on the lower 2 bytes (as above)
@@ -32,6 +32,7 @@ But as indicated above, all of those can be overridden by command line options. 
 It will merrily handle around 200000+ requests a second (tested on localhost on Ubuntu 18.04 on a Toshiba i7 laptop with 16GB of RAM) - you're largely limited by the hardware you run it on.
 
 # TODO
+* Implement -daemon mode.
 * Allow a user:group to be set to chroot into if running in daemon mode
 * Define a config file that can configure all of the above to be found in -confdir
 * Create a separate long-lived port so clients can maintain a connection, rather than re-establish one each time.
@@ -39,5 +40,3 @@ It will merrily handle around 200000+ requests a second (tested on localhost on 
 ** server would respond with the number and a `0x03` (ETX - end transmission)
 ** client could send a `0x07` (bell - to go ping!) and expect a `0x07` in response to check a connection is alive
 ** server would time out after a configurable number of seconds of no traffic and close the socket
-* Save all running params to the progress file too to assist in safer restarts - would override all other settings, commandline included
-* Have a nice shutdown mode (`SIGTERM`) that writes the lower 16 byte number to the progress file to reduce the burn rate
